@@ -1,0 +1,137 @@
+#!/usr/bin/env python
+from os import popen, system
+from time import sleep
+from sys import argv, stdout
+
+# Read bparams
+BPARAMS = popen("bparams -a").read().split("\n")
+
+# Para
+CPU_TIME_FACTOR, RUN_TIME_FACTOR, RUN_JOB_FACTOR, FAIRSHARE_ADJUSTMENT_FACTOR = 0, 0, 0, 0
+for line in BPARAMS:
+    if line.find("CPU_TIME_FACTOR") == 8:
+        CPU_TIME_FACTOR = float(line.split()[2])
+    elif line.find("RUN_TIME_FACTOR") == 8:
+        RUN_TIME_FACTOR = float(line.split()[2])
+    elif line.find("RUN_JOB_FACTOR") == 8:
+        RUN_JOB_FACTOR = float(line.split()[2])
+    elif line.find("FAIRSHARE_ADJUSTMENT_FACTOR") == 8:
+        FAIRSHARE_ADJUSTMENT_FACTOR = float(line.split()[2])
+
+# Get data
+#QUEUE = argv[1] if len(argv) > 1 else "normal"
+BQUEUE = popen("bqueues -l normal").read().split("\n")
+STARTLINE = [
+    i + 2 for i in xrange(len(BQUEUE))
+    if BQUEUE[i].find("SHARE_INFO_FOR") != -1
+][0]
+ENDLINE = [
+    STARTLINE + i for i in xrange(len(BQUEUE[STARTLINE:]))
+    if BQUEUE[i + STARTLINE] == ''
+][0]
+
+
+# function of calculate priority
+def Calc_priority(line):
+    # sort data
+    DATA = line.split()
+    USER, SHARES, JOB_SLOT = DATA[0], int(DATA[1]), int(DATA[3])
+    CPU_TIME, RUN_TIME, ADJUST = float(DATA[5]), float(DATA[6]), float(DATA[7])
+    PRIORITY = SHARES / (
+        CPU_TIME * CPU_TIME_FACTOR + RUN_TIME * RUN_TIME_FACTOR +
+        (1 + JOB_SLOT) * RUN_JOB_FACTOR + ADJUST * FAIRSHARE_ADJUSTMENT_FACTOR)
+    return [USER, PRIORITY]
+
+
+# print result
+PRIO = [Calc_priority(line) for line in BQUEUE[STARTLINE:ENDLINE]]
+PRIO = [line for line in PRIO if 'lsfadmin' not in line[0]]
+PRIO.sort(key=lambda x: x[1], reverse=True)
+PRIO = "priority: " + "".join(
+    ["%s [%8.4G]   " % (line[0], line[1]) for line in PRIO])
+
+
+def bjob():
+    # Get lsload of HOSTS
+    nodes = [line.split() for line in popen("lsload").read().split("\n")[1:-1]]
+    LOAD = {line[0]: line[5] if line[1] == 'ok' else 'Err' for line in nodes}
+    MEMO = {
+        line[0]: "%5G" % float(line[6]) if line[1] == 'ok' else '  Err'
+        for line in nodes
+    }
+
+    # Get our group running nodes
+    BJOBS = popen("bjobs -u all").read().split("\n")
+    BJOBS = [
+        line[0:16] + line[22:29] + line[44:56] + line[57:] for line in BJOBS
+    ]
+
+    # Get our group running nodes detail
+    _BJOBSL = popen("bjobs -l -u all").read().split("\n")
+    BJOBSL, tmp, FLAG = [], None, False
+    for line in _BJOBSL:
+        if line == '': continue
+        if line[:3] == 'Job': FLAG = True
+        elif line[:11] == ' SCHEDULING': FLAG = False
+        if FLAG == False: continue
+
+        if line[0] != ' ':
+            BJOBSL.append(tmp)
+            tmp = line
+        elif line.find(" " * 21) == 0:
+            tmp += line[21:]
+    BJOBSL.append(tmp)
+
+    BJOBSS, JOBID, EXECTIME, SLOTS, FLAG = {}, 0, 0, 0, 0
+    for line in BJOBSL[1:] + ["Job <29>,"]:
+        if line[:3] == "Job":
+            if FLAG == 2:
+                BJOBSS[JOBID] = " " * 13 + "%4s" % SLOTS
+            elif FLAG in [3, 4]:
+                BJOBSS[JOBID] = EXECTIME + " " + "%4s" % SLOTS
+            FLAG = 0
+        if FLAG == 0:
+            JOBID = int(line.split()[1].strip("<>,"))
+        elif FLAG == 1:
+            SLOTS = [
+                part.split()[0] for part in line.split(",")
+                if part.find("Task(s)") != -1
+            ]
+            SLOTS = SLOTS[0] if len(SLOTS) > 0 else "Err"
+        elif FLAG == 2:
+            EXECTIME = line[4:16]
+        FLAG += 1
+
+    BJOBS[0] += "  EXECUTE_TIME SLOT  CPU MEMO"
+    for i, line in enumerate(BJOBS[1:-1]):
+        if line[0] == " ":
+            _host = line[24:35].strip()
+            host = _host.split("*")[1] if "*" in _host else _host
+            BJOBS[i + 1] += " " * 44 + "%4s" % LOAD[host] + MEMO[host]
+        else:
+            BJOBS[i + 1] += " " + BJOBSS[int(line[:6])]
+            if line[24:35].strip() != '':
+                _host = line[24:35].strip()
+                host = _host.split("*")[1] if "*" in _host else _host
+                BJOBS[i + 1] += " " + "%4s" % LOAD[host] + MEMO[host]
+
+    FLAG = 0
+    for line in BJOBS[:70]:
+        if line[24:33].strip() == '': FLAG += 1
+        if FLAG == 1: stdout.write(PRIO + "\n")
+        stdout.write(line + "\n")
+
+
+if len(argv) > 1:
+    system("bjobs -l %s" % argv[1])
+    exit(0)
+
+DEBUG = False
+if DEBUG: bjob()
+else:
+    while True:
+        try:
+            bjob()
+            break
+        except:
+            sleep(0.1)
